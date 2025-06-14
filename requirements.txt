@@ -1,0 +1,14 @@
+fastapi>=0.104.1
+uvicorn>=0.24.0
+streamlit>=1.28.1
+pandas>=2.2.0
+openpyxl>=3.1.2
+xlrd>=2.0.1
+python-multipart>=0.0.6
+sqlalchemy>=2.0.23
+fuzzywuzzy>=0.18.0
+python-levenshtein>=0.23.0
+chardet>=5.2.0
+aiofiles>=23.2.1
+python-dateutil>=2.8.2
+requests>=2.31.0 
