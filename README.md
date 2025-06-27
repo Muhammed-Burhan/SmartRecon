@@ -180,4 +180,4 @@ This system is designed to be extensible. Key areas for enhancement:
 
 ---
 
-**Built with**: Python 3.13, FastAPI, Streamlit, Pandas, SQLite 
+**Built with**: Python 3.13,  FastAPI, Streamlit, Pandas, SQLite 
