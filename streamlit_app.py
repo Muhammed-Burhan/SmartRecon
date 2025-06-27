@@ -104,14 +104,67 @@ def upload_files_page():
     st.subheader("Job Configuration")
     job_name = st.text_input("Job Name", value=f"Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     
+    # Column selection options
+    our_trx_column = None
+    bank_trx_column = None
+    
+    if our_file and bank_file:
+        st.subheader("🔧 Advanced Options (Optional)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Our File - Bank Trx ID Column:**")
+            try:
+                if our_file.name.endswith('.csv'):
+                    our_df_preview = pd.read_csv(our_file)
+                else:
+                    our_df_preview = pd.read_excel(our_file)
+                
+                our_columns = list(our_df_preview.columns)
+                our_trx_column = st.selectbox(
+                    "Select Bank Trx ID column (leave as 'Auto-detect' for automatic detection):",
+                    ["Auto-detect"] + our_columns,
+                    key="our_trx_col"
+                )
+                if our_trx_column == "Auto-detect":
+                    our_trx_column = None
+                
+                # Reset file pointer
+                our_file.seek(0)
+            except Exception as e:
+                st.warning(f"Could not read our file for column selection: {str(e)}")
+        
+        with col2:
+            st.write("**Bank File - Bank Trx ID Column:**")
+            try:
+                if bank_file.name.endswith('.csv'):
+                    bank_df_preview = pd.read_csv(bank_file)
+                else:
+                    bank_df_preview = pd.read_excel(bank_file)
+                
+                bank_columns = list(bank_df_preview.columns)
+                bank_trx_column = st.selectbox(
+                    "Select Bank Trx ID column (leave as 'Auto-detect' for automatic detection):",
+                    ["Auto-detect"] + bank_columns,
+                    key="bank_trx_col"
+                )
+                if bank_trx_column == "Auto-detect":
+                    bank_trx_column = None
+                
+                # Reset file pointer
+                bank_file.seek(0)
+            except Exception as e:
+                st.warning(f"Could not read bank file for column selection: {str(e)}")
+    
     # Process button
     if st.button("🚀 Start Reconciliation", type="primary"):
         if our_file and bank_file and job_name:
-            process_reconciliation(our_file, bank_file, job_name)
+            process_reconciliation(our_file, bank_file, job_name, our_trx_column, bank_trx_column)
         else:
             st.error("Please upload both files and provide a job name.")
 
-def process_reconciliation(our_file, bank_file, job_name):
+def process_reconciliation(our_file, bank_file, job_name, our_trx_column=None, bank_trx_column=None):
     """Process the reconciliation via API"""
     
     with st.spinner("Processing reconciliation... This may take a few minutes for large files."):
@@ -123,6 +176,10 @@ def process_reconciliation(our_file, bank_file, job_name):
             }
             
             data = {'job_name': job_name}
+            if our_trx_column:
+                data['our_trx_column'] = our_trx_column
+            if bank_trx_column:
+                data['bank_trx_column_manual'] = bank_trx_column
             
             # Make API call
             response = requests.post(f"{API_BASE_URL}/upload-files/", files=files, data=data)

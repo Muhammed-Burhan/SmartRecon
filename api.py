@@ -20,6 +20,8 @@ async def upload_files(
     our_file: UploadFile = File(...),
     bank_file: UploadFile = File(...),
     job_name: str = Form(...),
+    our_trx_column: str = Form(None),
+    bank_trx_column_manual: str = Form(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -39,20 +41,30 @@ async def upload_files(
         our_df = engine.load_file(our_file_path)
         bank_df = engine.load_file(bank_file_path)
         
-        # Find Bank Trx ID column in bank file
-        bank_trx_column, confidence = engine.find_bank_trx_column(bank_df)
-        
-        if confidence < 20:  # Minimum confidence threshold
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not identify Bank Trx ID column with sufficient confidence. Best guess: '{bank_trx_column}' (confidence: {confidence:.1f})"
-            )
+        # Find Bank Trx ID column in bank file (or use manual selection)
+        if bank_trx_column_manual:
+            bank_trx_column = bank_trx_column_manual
+            confidence = 100.0  # Manual selection = 100% confidence
+        else:
+            bank_trx_column, confidence = engine.find_bank_trx_column(bank_df)
+            
+            if confidence < 20:  # Minimum confidence threshold
+                # Return available columns for manual selection
+                available_columns = list(bank_df.columns)
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": f"Could not identify Bank Trx ID column with sufficient confidence. Best guess: '{bank_trx_column}' (confidence: {confidence:.1f})",
+                        "available_columns": available_columns,
+                        "suggested_column": bank_trx_column
+                    }
+                )
         
         # Extract Bank Trx IDs from bank file
         bank_trx_ids = engine.extract_bank_trx_ids(bank_df, bank_trx_column)
         
         # Identify which bank(s) these transactions belong to
-        bank_matches = engine.identify_bank_from_trx_ids(our_df, bank_trx_ids)
+        bank_matches = engine.identify_bank_from_trx_ids(our_df, bank_trx_ids, our_trx_column)
         
         if not bank_matches:
             raise HTTPException(
@@ -64,7 +76,7 @@ async def upload_files(
         target_bank = max(bank_matches.keys(), key=lambda k: len(bank_matches[k]))
         
         # Perform reconciliation
-        results = engine.perform_reconciliation(our_df, bank_df, bank_trx_column, target_bank)
+        results = engine.perform_reconciliation(our_df, bank_df, bank_trx_column, target_bank, our_trx_column)
         
         # Save job to database
         job = ReconciliationJob(
@@ -225,6 +237,61 @@ async def get_job_report(job_id: int, db: Session = Depends(get_db)):
     report = engine.generate_report(results_dict, job.bank_name)
     
     return {"report": report}
+
+@app.post("/analyze-files/")
+async def analyze_files(
+    our_file: UploadFile = File(...),
+    bank_file: UploadFile = File(...)
+):
+    """Analyze files and suggest column mappings"""
+    try:
+        # Create temporary files
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(our_file.filename)[1]) as temp_our:
+            temp_our.write(await our_file.read())
+            our_file_path = temp_our.name
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(bank_file.filename)[1]) as temp_bank:
+            temp_bank.write(await bank_file.read())
+            bank_file_path = temp_bank.name
+        
+        # Load files
+        our_df = engine.load_file(our_file_path)
+        bank_df = engine.load_file(bank_file_path)
+        
+        # Find suggested columns
+        our_trx_column, our_confidence = engine.find_our_bank_trx_column(our_df)
+        bank_trx_column, bank_confidence = engine.find_bank_trx_column(bank_df)
+        
+        # Cleanup temporary files
+        os.unlink(our_file_path)
+        os.unlink(bank_file_path)
+        
+        return {
+            "our_file": {
+                "columns": list(our_df.columns),
+                "suggested_trx_column": our_trx_column,
+                "confidence": our_confidence,
+                "preview": our_df.head(3).to_dict('records')
+            },
+            "bank_file": {
+                "columns": list(bank_df.columns),
+                "suggested_trx_column": bank_trx_column,
+                "confidence": bank_confidence,
+                "preview": bank_df.head(3).to_dict('records')
+            }
+        }
+        
+    except Exception as e:
+        # Cleanup temporary files if they exist
+        try:
+            if 'our_file_path' in locals():
+                os.unlink(our_file_path)
+            if 'bank_file_path' in locals():
+                os.unlink(bank_file_path)
+        except:
+            pass
+        
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():

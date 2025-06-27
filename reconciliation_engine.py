@@ -54,9 +54,71 @@ class ReconciliationEngine:
             logger.error(f"Error loading file: {str(e)}")
             raise
     
+    def find_our_bank_trx_column(self, df: pd.DataFrame) -> Tuple[str, float]:
+        """
+        Find Bank Trx ID column in OUR reconciliation file
+        Returns: (column_name, confidence_score)
+        """
+        column_scores = {}
+        
+        # Enhanced patterns for our file column names
+        our_file_patterns = [
+            'bank trx id', 'banktrxid', 'bank_trx_id', 'bank transaction id',
+            'banktransactionid', 'bank_transaction_id', 'trx id', 'trxid',
+            'transaction id', 'transactionid', 'bank ref', 'bankref',
+            'bank reference', 'bankreference', 'payment ref', 'paymentref'
+        ]
+        
+        for col in df.columns:
+            score = 0
+            col_lower = str(col).lower().strip().replace(' ', '').replace('_', '').replace('-', '')
+            col_original = str(col).lower().strip()
+            
+            # Strategy 1: Exact and fuzzy matching for our file patterns
+            for pattern in our_file_patterns:
+                pattern_clean = pattern.replace(' ', '').replace('_', '').replace('-', '')
+                if pattern_clean == col_lower:
+                    score += 100  # Perfect match
+                elif pattern in col_original:
+                    score += 80   # Good match
+                elif pattern_clean in col_lower:
+                    score += 60   # Partial match
+            
+            # Strategy 2: Keyword matching
+            if any(keyword in col_original for keyword in ['bank', 'trx', 'transaction']):
+                score += 40
+            
+            if any(keyword in col_original for keyword in ['id', 'ref', 'reference']):
+                score += 20
+            
+            # Strategy 3: Content pattern matching
+            sample_values = df[col].dropna().astype(str).head(100)
+            if len(sample_values) > 0:
+                pattern_matches = 0
+                for value in sample_values:
+                    for pattern in self.bank_trx_patterns:
+                        if re.search(pattern, str(value)):
+                            pattern_matches += 1
+                            break
+                
+                if pattern_matches > 0:
+                    pattern_ratio = pattern_matches / len(sample_values)
+                    score += pattern_ratio * 30
+            
+            column_scores[col] = score
+        
+        if not column_scores:
+            return None, 0
+        
+        best_column = max(column_scores, key=column_scores.get)
+        best_score = column_scores[best_column]
+        
+        logger.info(f"Best Bank Trx ID column in our file: '{best_column}' with score: {best_score}")
+        return best_column, best_score
+    
     def find_bank_trx_column(self, df: pd.DataFrame) -> Tuple[str, float]:
         """
-        Smart detection of Bank Trx ID column using multiple strategies
+        Smart detection of Bank Trx ID column in BANK/PSP file
         Returns: (column_name, confidence_score)
         """
         column_scores = {}
@@ -100,7 +162,7 @@ class ReconciliationEngine:
         best_column = max(column_scores, key=column_scores.get)
         best_score = column_scores[best_column]
         
-        logger.info(f"Best Bank Trx ID column: '{best_column}' with score: {best_score}")
+        logger.info(f"Best Bank Trx ID column in bank file: '{best_column}' with score: {best_score}")
         return best_column, best_score
     
     def extract_bank_trx_ids(self, df: pd.DataFrame, column: str) -> List[str]:
@@ -123,19 +185,25 @@ class ReconciliationEngine:
         
         return list(set(trx_ids))  # Remove duplicates
     
-    def identify_bank_from_trx_ids(self, our_df: pd.DataFrame, bank_trx_ids: List[str]) -> Dict[str, List[str]]:
+    def identify_bank_from_trx_ids(self, our_df: pd.DataFrame, bank_trx_ids: List[str], our_trx_column: str = None) -> Dict[str, List[str]]:
         """
         Identify which bank these transaction IDs belong to by matching with our data
         Returns: {bank_name: [matching_trx_ids]}
         """
         bank_matches = {}
         
+        # Use provided column or auto-detect
+        if our_trx_column is None:
+            our_trx_column, confidence = self.find_our_bank_trx_column(our_df)
+            if confidence < 50:
+                logger.warning(f"Low confidence ({confidence}) for our Bank Trx ID column: '{our_trx_column}'")
+        
         # Get our Bank Trx IDs and corresponding bank names
-        our_trx_ids = our_df['Bank Trx ID'].dropna().astype(str).tolist()
+        our_trx_ids = our_df[our_trx_column].dropna().astype(str).tolist()
         
         for bank_trx_id in bank_trx_ids:
             # Find matching records in our data
-            matches = our_df[our_df['Bank Trx ID'].astype(str) == str(bank_trx_id)]
+            matches = our_df[our_df[our_trx_column].astype(str) == str(bank_trx_id)]
             
             if not matches.empty:
                 bank_name = matches['Paying Bank Name'].iloc[0]
@@ -175,7 +243,7 @@ class ReconciliationEngine:
         return obj_dict
     
     def perform_reconciliation(self, our_df: pd.DataFrame, bank_df: pd.DataFrame, 
-                             bank_trx_column: str, target_bank: str) -> Dict:
+                             bank_trx_column: str, target_bank: str, our_trx_column: str = None) -> Dict:
         """
         Perform the actual reconciliation between our data and bank data
         """
@@ -189,9 +257,15 @@ class ReconciliationEngine:
         # Extract Bank Trx IDs from bank file
         bank_trx_ids = set(self.extract_bank_trx_ids(bank_df, bank_trx_column))
         
+        # Use provided column or auto-detect
+        if our_trx_column is None:
+            our_trx_column, confidence = self.find_our_bank_trx_column(our_df)
+            if confidence < 50:
+                logger.warning(f"Low confidence ({confidence}) for our Bank Trx ID column: '{our_trx_column}'")
+        
         # Filter our data for the target bank
         our_bank_data = our_df[our_df['Paying Bank Name'] == target_bank].copy()
-        our_trx_ids = set(our_bank_data['Bank Trx ID'].astype(str).tolist())
+        our_trx_ids = set(our_bank_data[our_trx_column].astype(str).tolist())
         
         # Find matches and mismatches
         matched_ids = our_trx_ids.intersection(bank_trx_ids)
@@ -200,7 +274,7 @@ class ReconciliationEngine:
         
         # Prepare detailed results
         for trx_id in matched_ids:
-            our_record = our_bank_data[our_bank_data['Bank Trx ID'].astype(str) == trx_id].iloc[0]
+            our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
             bank_record = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)].iloc[0]
             
             results['matched'].append({
@@ -210,7 +284,7 @@ class ReconciliationEngine:
             })
         
         for trx_id in missing_in_bank:
-            our_record = our_bank_data[our_bank_data['Bank Trx ID'].astype(str) == trx_id].iloc[0]
+            our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
             results['missing_in_bank'].append({
                 'bank_trx_id': trx_id,
                 'our_record': self._convert_to_json_serializable(our_record)
