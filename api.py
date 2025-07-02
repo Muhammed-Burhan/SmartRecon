@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from sqlalchemy.orm import Session
 import tempfile
 import os
@@ -9,6 +9,7 @@ from datetime import datetime
 
 from database import get_db, ReconciliationJob, ReconciliationResult
 from reconciliation_engine import ReconciliationEngine
+from pdf_report_generator import PDFReportGenerator
 
 app = FastAPI(title="Bank Reconciliation System", version="1.0.0")
 
@@ -237,6 +238,68 @@ async def get_job_report(job_id: int, db: Session = Depends(get_db)):
     report = engine.generate_report(results_dict, job.bank_name)
     
     return {"report": report}
+
+@app.get("/jobs/{job_id}/pdf-report/")
+async def get_job_pdf_report(job_id: int, db: Session = Depends(get_db)):
+    """Generate and return a PDF reconciliation report for a job"""
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    results = db.query(ReconciliationResult).filter(ReconciliationResult.job_id == job_id).all()
+    
+    # Convert job to dictionary
+    job_dict = {
+        'id': job.id,
+        'job_name': job.job_name,
+        'bank_name': job.bank_name,
+        'our_file_name': job.our_file_name,
+        'bank_file_name': job.bank_file_name,
+        'created_at': job.created_at.isoformat() if job.created_at else None,
+        'status': job.status,
+        'total_our_records': job.total_our_records,
+        'total_bank_records': job.total_bank_records,
+        'matched_records': job.matched_records,
+        'unmatched_our_records': job.unmatched_our_records,
+        'unmatched_bank_records': job.unmatched_bank_records
+    }
+    
+    # Convert results to list of dictionaries
+    results_list = []
+    for result in results:
+        result_dict = {
+            'bank_trx_id': result.bank_trx_id,
+            'status': result.status,
+            'paying_bank_name': result.paying_bank_name,
+            'amount': result.amount,
+            'created_at': result.created_at.isoformat() if result.created_at else None
+        }
+        results_list.append(result_dict)
+    
+    # Generate PDF report
+    pdf_generator = PDFReportGenerator()
+    
+    # Create temporary file for PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
+        pdf_path = temp_pdf.name
+    
+    try:
+        # Generate the PDF report
+        pdf_generator.generate_reconciliation_report(job_dict, results_list, pdf_path)
+        
+        # Return the PDF file
+        return FileResponse(
+            path=pdf_path,
+            filename=f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            media_type='application/pdf'
+        )
+    except Exception as e:
+        # Cleanup on error
+        try:
+            os.unlink(pdf_path)
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Error generating PDF: {str(e)}")
 
 @app.post("/analyze-files/")
 async def analyze_files(
