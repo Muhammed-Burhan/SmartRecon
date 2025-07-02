@@ -364,15 +364,39 @@ def job_details_page():
                     if len(filtered_results) > 100:
                         st.info(f"Showing first 100 out of {len(filtered_results)} results")
                 
-                # Generate report
-                if st.button("📋 Generate Full Report"):
-                    report_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/report/")
-                    if report_response.status_code == 200:
-                        report_data = report_response.json()
-                        st.subheader("Full Report")
-                        st.text(report_data['report'])
-                    else:
-                        st.error("Failed to generate report")
+                # Generate report and PDF download
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("📋 Generate Full Report"):
+                        report_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/report/")
+                        if report_response.status_code == 200:
+                            report_data = report_response.json()
+                            st.subheader("Full Report")
+                            st.text(report_data['report'])
+                        else:
+                            st.error("Failed to generate report")
+                
+                with col2:
+                    if st.button("📄 Download PDF Report"):
+                        try:
+                            pdf_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/pdf-report/")
+                            if pdf_response.status_code == 200:
+                                # Get filename from response headers
+                                filename = f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                                
+                                # Create download button
+                                st.download_button(
+                                    label="💾 Save PDF Report",
+                                    data=pdf_response.content,
+                                    file_name=filename,
+                                    mime="application/pdf"
+                                )
+                                st.success("✅ PDF report generated successfully!")
+                            else:
+                                st.error("Failed to generate PDF report")
+                        except Exception as e:
+                            st.error(f"Error generating PDF: {str(e)}")
                         
             elif response.status_code == 404:
                 st.error("Job not found")
