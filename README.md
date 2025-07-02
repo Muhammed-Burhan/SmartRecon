@@ -12,6 +12,7 @@ A sophisticated web-based system for reconciling financial transactions between 
 - **API Backend**: FastAPI server for processing and data management
 - **Database Storage**: SQLite database for storing reconciliation history
 - **Large File Support**: Efficiently handles files with 250k+ rows
+- **PDF Report Download**: Download professional reconciliation reports as PDF from the Job Details page
 
 ## 🚀 Quick Start
 
@@ -70,6 +71,7 @@ The web app will be available at `http://localhost:8501`
    - ❌ **Missing in Bank**: Transactions in your file but not in bank file
    - ⚠️ **Missing in Our File**: Transactions in bank file but not in your file
 5. **Reporting**: Generates detailed reconciliation report
+6. **PDF Download**: After reconciliation, download a professional PDF report from the Job Details page for any job. The PDF includes a summary, statistics, and detailed results for your records or sharing.
 
 ## 🔧 System Architecture
 
@@ -119,6 +121,7 @@ The system recognizes various Bank Trx ID patterns:
 - `GET /jobs/` - List all reconciliation jobs
 - `GET /jobs/{job_id}/` - Get specific job details
 - `GET /jobs/{job_id}/report/` - Generate detailed report
+- `GET /jobs/{job_id}/pdf-report/` - Download reconciliation report as a PDF file
 
 ## 📁 File Structure
 
