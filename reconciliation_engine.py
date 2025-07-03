@@ -1,10 +1,8 @@
 import pandas as pd
 import re
-from fuzzywuzzy import fuzz, process
-from typing import Dict, List, Tuple, Optional
-import json
-import chardet
 import logging
+from typing import List, Tuple, Dict
+import chardet
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -12,21 +10,30 @@ logger = logging.getLogger(__name__)
 
 class ReconciliationEngine:
     def __init__(self):
-        # Standard column names for our reconciliation file
-        self.our_standard_columns = [
-            'No', 'Biller Name', 'Paying Bank Name', 'Settlement Bank Name',
-            'Service Name', 'Billing No', 'Payment Type', 'Payment Status',
-            'JOEBPPSTrx', 'Bank Trx ID', 'Corridor', 'Access Channel',
-            'Process Date', 'Settlement Date', 'Due Amt', 'Paid Amt'
-        ]
-        
-        # Patterns to identify Bank Trx ID in various formats
-        self.bank_trx_patterns = [
-            r'[A-Z]{2,4}\d{10,20}',  # Format like TBPM25160112163910187
-            r'[A-Z]+\d+[A-Z]*\d*',   # Mixed alphanumeric
-            r'\d{10,20}',             # Pure numeric long IDs
-            r'[A-Z]{3,5}\d{8,15}',    # Bank code + numbers
-        ]
+        """Initialize the reconciliation engine"""
+        # Bank name patterns for identification (generic examples - works with any bank worldwide)
+        self.bank_patterns = {
+            'HSBC': [r'HSBC', r'hsbc'],
+            'Standard Chartered': [r'Standard', r'standard', r'SCB', r'scb'],
+            'Citibank': [r'Citi', r'citi'],
+            'JPMorgan Chase': [r'Chase', r'chase', r'JPMorgan', r'jpmorgan'],
+            'Bank of America': [r'Bank of America', r'BofA', r'bofa'],
+            'Wells Fargo': [r'Wells', r'wells'],
+            'Deutsche Bank': [r'Deutsche', r'deutsche'],
+            'Barclays': [r'Barclays', r'barclays'],
+            'BNP Paribas': [r'BNP', r'bnp', r'Paribas', r'paribas'],
+            'Credit Suisse': [r'Credit Suisse', r'credit suisse'],
+            'ING Bank': [r'ING', r'ing'],
+            'Royal Bank': [r'Royal', r'royal', r'RBC', r'rbc'],
+            'Commonwealth Bank': [r'Commonwealth', r'commonwealth', r'CBA', r'cba'],
+            'ANZ Bank': [r'ANZ', r'anz'],
+            'National Bank': [r'National', r'national', r'NBK', r'nbk'],
+            'First National': [r'First National', r'first national'],
+            'Central Bank': [r'Central', r'central'],
+            'Commercial Bank': [r'Commercial', r'commercial'],
+            'Investment Bank': [r'Investment', r'investment'],
+            'International Bank': [r'International', r'international']
+        }
     
     def detect_encoding(self, file_path: str) -> str:
         """Detect file encoding"""
@@ -74,7 +81,7 @@ class ReconciliationEngine:
             col_lower = str(col).lower().strip().replace(' ', '').replace('_', '').replace('-', '')
             col_original = str(col).lower().strip()
             
-            # Strategy 1: Exact and fuzzy matching for our file patterns
+            # Strategy 1: Exact matching for our file patterns
             for pattern in our_file_patterns:
                 pattern_clean = pattern.replace(' ', '').replace('_', '').replace('-', '')
                 if pattern_clean == col_lower:
@@ -94,16 +101,20 @@ class ReconciliationEngine:
             # Strategy 3: Content pattern matching
             sample_values = df[col].dropna().astype(str).head(100)
             if len(sample_values) > 0:
-                pattern_matches = 0
-                for value in sample_values:
-                    for pattern in self.bank_trx_patterns:
-                        if re.search(pattern, str(value)):
-                            pattern_matches += 1
-                            break
+                # Focus on data characteristics rather than pattern matching
+                non_empty_count = len([v for v in sample_values if str(v).strip() and str(v).lower() not in ['nan', 'none', 'null']])
+                unique_count = len(set(sample_values))
                 
-                if pattern_matches > 0:
-                    pattern_ratio = pattern_matches / len(sample_values)
-                    score += pattern_ratio * 30
+                # Bonus points for columns with mostly unique, non-empty values
+                if non_empty_count > 0:
+                    uniqueness_ratio = unique_count / non_empty_count
+                    if uniqueness_ratio > 0.8:  # High uniqueness suggests transaction IDs
+                        score += 25
+                    
+                    # Bonus for reasonable length values (likely transaction IDs)
+                    avg_length = sum(len(str(v).strip()) for v in sample_values) / len(sample_values)
+                    if 8 <= avg_length <= 30:  # Reasonable transaction ID length
+                        score += 15
             
             column_scores[col] = score
         
@@ -137,22 +148,20 @@ class ReconciliationEngine:
             # Strategy 2: Content pattern matching
             sample_values = df[col].dropna().astype(str).head(100)
             if len(sample_values) > 0:
-                pattern_matches = 0
-                for value in sample_values:
-                    for pattern in self.bank_trx_patterns:
-                        if re.search(pattern, str(value)):
-                            pattern_matches += 1
-                            break
+                # Focus on data characteristics rather than pattern matching
+                non_empty_count = len([v for v in sample_values if str(v).strip() and str(v).lower() not in ['nan', 'none', 'null']])
+                unique_count = len(set(sample_values))
                 
-                pattern_ratio = pattern_matches / len(sample_values)
-                score += pattern_ratio * 50
-            
-            # Strategy 3: Length and format consistency
-            if len(sample_values) > 0:
-                lengths = [len(str(val)) for val in sample_values]
-                avg_length = sum(lengths) / len(lengths)
-                if 10 <= avg_length <= 25:  # Typical transaction ID length
-                    score += 15
+                # Bonus points for columns with mostly unique, non-empty values
+                if non_empty_count > 0:
+                    uniqueness_ratio = unique_count / non_empty_count
+                    if uniqueness_ratio > 0.7:  # High uniqueness suggests transaction IDs
+                        score += 35
+                    
+                    # Bonus for reasonable length values (likely transaction IDs)
+                    avg_length = sum(len(str(v).strip()) for v in sample_values) / len(sample_values)
+                    if 8 <= avg_length <= 30:  # Reasonable transaction ID length
+                        score += 20
             
             column_scores[col] = score
         
@@ -164,26 +173,22 @@ class ReconciliationEngine:
         
         logger.info(f"Best Bank Trx ID column in bank file: '{best_column}' with score: {best_score}")
         return best_column, best_score
-    
+
     def extract_bank_trx_ids(self, df: pd.DataFrame, column: str) -> List[str]:
-        """Extract clean Bank Trx IDs from the identified column"""
+        """Extract Bank Trx IDs exactly as they appear - NO pattern matching or modification"""
         trx_ids = []
         
         for value in df[column].dropna():
-            value_str = str(value)
-            # Try to extract transaction ID using patterns
-            for pattern in self.bank_trx_patterns:
-                matches = re.findall(pattern, value_str)
-                if matches:
-                    trx_ids.extend(matches)
-                    break
-            else:
-                # If no pattern matches, use the value as is (cleaned)
-                clean_value = re.sub(r'[^\w]', '', value_str)
-                if len(clean_value) >= 8:  # Minimum reasonable length
-                    trx_ids.append(clean_value)
+            value_str = str(value).strip()  # Only remove leading/trailing whitespace
+            
+            # Skip empty values
+            if not value_str or value_str.lower() in ['nan', 'none', 'null']:
+                continue
+                
+            # Use the value EXACTLY as it appears - no extraction or modification
+            trx_ids.append(value_str)
         
-        return list(set(trx_ids))  # Remove duplicates
+        return list(set(trx_ids))  # Remove duplicates only
     
     def identify_bank_from_trx_ids(self, our_df: pd.DataFrame, bank_trx_ids: List[str], our_trx_column: str = None) -> Dict[str, List[str]]:
         """
@@ -202,9 +207,9 @@ class ReconciliationEngine:
         our_trx_ids = our_df[our_trx_column].dropna().astype(str).tolist()
         
         for bank_trx_id in bank_trx_ids:
-            # Find matching records in our data
+            # Use exact matching only
             matches = our_df[our_df[our_trx_column].astype(str) == str(bank_trx_id)]
-            
+        
             if not matches.empty:
                 bank_name = matches['Paying Bank Name'].iloc[0]
                 if bank_name not in bank_matches:
@@ -267,22 +272,33 @@ class ReconciliationEngine:
         our_bank_data = our_df[our_df['Paying Bank Name'] == target_bank].copy()
         our_trx_ids = set(our_bank_data[our_trx_column].astype(str).tolist())
         
-        # Find matches and mismatches
+        # Find exact matches
         matched_ids = our_trx_ids.intersection(bank_trx_ids)
-        missing_in_bank = our_trx_ids - bank_trx_ids
-        missing_in_our_file = bank_trx_ids - our_trx_ids
         
-        # Prepare detailed results
+        # Find missing records  
+        missing_in_bank = our_trx_ids - matched_ids
+        missing_in_our_file = bank_trx_ids - matched_ids
+        
+        # Prepare detailed results for exact matches
         for trx_id in matched_ids:
             our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
-            bank_record = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)].iloc[0]
             
-            results['matched'].append({
-                'bank_trx_id': trx_id,
-                'our_record': self._convert_to_json_serializable(our_record),
-                'bank_record': self._convert_to_json_serializable(bank_record)
-            })
+            # Find bank record more safely
+            bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str) == trx_id]
+            if bank_matches_df.empty:
+                # Try contains if exact match fails
+                bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)]
+            
+            if not bank_matches_df.empty:
+                bank_record = bank_matches_df.iloc[0]
+                
+                results['matched'].append({
+                    'bank_trx_id': trx_id,
+                    'our_record': self._convert_to_json_serializable(our_record),
+                    'bank_record': self._convert_to_json_serializable(bank_record)
+                })
         
+        # Handle remaining unmatched records
         for trx_id in missing_in_bank:
             our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
             results['missing_in_bank'].append({
@@ -291,20 +307,30 @@ class ReconciliationEngine:
             })
         
         for trx_id in missing_in_our_file:
-            bank_record = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)].iloc[0]
-            results['missing_in_our_file'].append({
-                'bank_trx_id': trx_id,
-                'bank_record': self._convert_to_json_serializable(bank_record)
-            })
+            # Find bank record more safely
+            bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str) == trx_id]
+            if bank_matches_df.empty:
+                # Try contains if exact match fails
+                bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)]
+            
+            if not bank_matches_df.empty:
+                bank_record = bank_matches_df.iloc[0]
+                results['missing_in_our_file'].append({
+                    'bank_trx_id': trx_id,
+                    'bank_record': self._convert_to_json_serializable(bank_record)
+                })
         
         # Summary statistics
+        total_matches = len(matched_ids)
         results['summary'] = {
             'total_our_records': len(our_trx_ids),
             'total_bank_records': len(bank_trx_ids),
-            'matched_records': len(matched_ids),
+            'matched_records': total_matches,
+            'exact_matches': total_matches,
+            'fuzzy_matches': 0, # No fuzzy matches - exact matching only
             'missing_in_bank_count': len(missing_in_bank),
             'missing_in_our_file_count': len(missing_in_our_file),
-            'match_percentage': (len(matched_ids) / max(len(our_trx_ids), 1)) * 100
+            'match_percentage': (total_matches / max(len(our_trx_ids), 1)) * 100
         }
         
         return results

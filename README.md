@@ -2,18 +2,34 @@
 
 A sophisticated web-based system for reconciling financial transactions between your settlement files and bank/PSP files. The system uses intelligent column detection to automatically identify Bank Transaction IDs and perform comprehensive reconciliation analysis.
 
-## ✨ Features
+## 🎯 Key Features
 
-- **Smart Column Detection**: Automatically identifies Bank Trx ID columns in bank/PSP files
-- **Multi-Format Support**: Handles both Excel (.xlsx, .xls) and CSV files
-- **Bank Identification**: Automatically determines which bank the transactions belong to
-- **Comprehensive Reconciliation**: Finds matched, missing, and extra transactions
-- **Network Sharing**: Share the application with your team - runs on your IP address for network access
-- **Web Interface**: User-friendly Streamlit frontend with file upload and reporting
-- **API Backend**: FastAPI server for processing and data management
-- **Database Storage**: SQLite database for storing reconciliation history
-- **Large File Support**: Efficiently handles files with 250k+ rows
-- **PDF Report Download**: Download professional reconciliation reports as PDF from the Job Details page
+### 🔍 Smart Column Detection
+- **Automatic Bank Transaction ID Detection**: Intelligent detection of Bank Transaction ID columns in both files
+- **Multi-Strategy Analysis**: Uses column names, data characteristics, and content patterns for reliable detection
+- **High Confidence Scoring**: Provides confidence scores for detected columns to ensure accuracy
+
+### 🏦 Multi-Bank Support
+- **Universal Bank Support**: Works with any bank's transaction file format worldwide
+- **Automatic Format Detection**: Intelligently detects transaction ID patterns from any banking system
+- **Automatic Bank Identification**: Identifies bank from transaction data automatically
+
+### ⚡ Exact Transaction Matching
+- **Exact ID Matching**: Uses Bank Transaction IDs exactly as they appear in files - **NO modification or extraction**
+- **Safe and Reliable**: Preserves all special characters, prefixes, and formats (No25020503350380, TBPM25160112163910187, etc.)
+- **Universal Format Support**: Works with ANY transaction ID format without pattern matching
+- **Empty Cell Handling**: Gracefully handles empty columns and missing transaction IDs
+
+### 📊 Comprehensive Reporting
+- **Detailed Match Results**: Shows exactly which transactions matched between files
+- **Missing Transaction Lists**: Identifies transactions present in one file but missing in the other
+- **Summary Statistics**: Match percentages, counts, and success rates
+- **PDF Report Generation**: Professional PDF reports with all reconciliation details
+
+### 🌐 Network Sharing Capability
+- **Built-in API**: FastAPI backend for programmatic access
+- **Network Access**: Share reconciliation service across your network
+- **RESTful Endpoints**: Easy integration with other systems
 
 ## 🚀 Quick Start
 
@@ -207,11 +223,34 @@ SQLite Database
 
 ## 📊 Supported Transaction ID Formats
 
-The system recognizes various Bank Trx ID patterns:
-- `TBPM25160112163910187` (Alphanumeric with bank code)
+The system uses **exact matching** - Bank Transaction IDs are used exactly as they appear in files with **NO modification or extraction**:
+
+✅ **Supported Formats (any format works):**
+- `TBPM25160112163910187` (Standard bank format)
+- `No25020503350380` (With "No" prefix)
+- `Ref1234567890123456789` (With "Ref" prefix)
+- `BMC-2025-001234` (With dashes)
+- `TRX_ID_987654321` (With underscores)
+- `Pay/2025/001/456789` (With slashes)
+- `2.5022816E+16` (Scientific notation - kept as text)
 - `1234567890123456789` (Pure numeric)
-- `ABC123456789DEF` (Mixed alphanumeric)
-- Custom patterns (system learns from your data)
+- **ANY other format** (system preserves exactly as appears)
+
+### 🛡️ **Exact Matching Benefits**
+
+**✅ Safe & Reliable:**
+```
+File contains: No25020503350380  
+System uses: No25020503350380 (exactly as appears)
+Result: Perfect match - no risk of modification errors
+```
+
+**✅ Universal Compatibility:**
+- Works with **ANY** bank transaction ID format
+- Preserves **ALL** special characters (-, _, /, etc.)
+- No pattern extraction - no bugs
+- Handles scientific notation as text
+- Never modifies original transaction IDs
 
 ## 💡 Usage Examples
 
