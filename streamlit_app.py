@@ -4,6 +4,8 @@ import pandas as pd
 import json
 from datetime import datetime
 import time
+import socket
+import os
 
 # Configure the page
 st.set_page_config(
@@ -12,8 +14,22 @@ st.set_page_config(
     layout="wide"
 )
 
-# API base URL
-API_BASE_URL = "http://localhost:8000"
+def get_local_ip():
+    """Get the local IP address of this machine"""
+    try:
+        # Connect to a remote address to determine local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+# API base URL - use environment variable or auto-detect IP
+API_HOST = os.getenv('API_HOST', get_local_ip())
+API_PORT = os.getenv('API_PORT', '8000')
+API_BASE_URL = f"http://{API_HOST}:{API_PORT}"
 
 def main():
     st.title("🏦 Bank Reconciliation System")
