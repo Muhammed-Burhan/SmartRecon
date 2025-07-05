@@ -116,7 +116,9 @@ def migrate_database():
             ('amount_comparison_performed', 'BOOLEAN DEFAULT FALSE'),
             ('our_total_amount', 'REAL'),
             ('bank_total_amount', 'REAL'),
-            ('amount_difference', 'REAL'),
+            ('matched_total_our', 'REAL'),
+            ('matched_total_bank', 'REAL'),
+            ('total_amount_difference', 'REAL'),
             ('amounts_match', 'BOOLEAN'),
             ('total_discrepancies', 'INTEGER DEFAULT 0')
         ]
@@ -135,7 +137,7 @@ def migrate_database():
             ('our_amount', 'REAL'),
             ('bank_amount', 'REAL'),
             ('amount_difference', 'REAL'),
-            ('amounts_match', 'BOOLEAN')
+            ('amount_match', 'BOOLEAN')
         ]
         
         for column_name, column_type in new_result_columns:
