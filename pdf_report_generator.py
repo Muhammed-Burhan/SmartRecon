@@ -171,8 +171,11 @@ class PDFReportGenerator:
                     created_date = result.get('created_at', 'N/A')
                     if created_date and created_date != 'N/A':
                         created_date = created_date[:19].replace('T', ' ')
+                    # Use dual display format if available, otherwise use regular ID
+                    trx_id_display = result.get('bank_trx_id_display', result.get('bank_trx_id', 'N/A'))
+                    
                     table_data.append([
-                        result.get('bank_trx_id', 'N/A'),
+                        trx_id_display,
                         result.get('paying_bank_name', 'N/A'),
                         amount_str,
                         created_date

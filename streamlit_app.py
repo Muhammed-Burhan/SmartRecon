@@ -272,7 +272,7 @@ def process_reconciliation(our_file, bank_file, job_name, our_trx_column=None, b
                             for i, disc in enumerate(amount_comp['discrepancies'][:50], 1):  # Show first 50
                                 discrepancy_data.append({
                                     '#': i,
-                                    'Transaction ID': disc['bank_trx_id'],
+                                    'Transaction ID': disc.get('bank_trx_id_display', disc['bank_trx_id']),
                                     'Our Amount': f"{disc['our_amount']:,.2f}",
                                     'Bank Amount': f"{disc['bank_amount']:,.2f}",
                                     'Difference': f"{disc['difference']:,.2f}",
@@ -314,6 +314,21 @@ def process_reconciliation(our_file, bank_file, job_name, our_trx_column=None, b
                 
                 # Save job ID in session state for easy access
                 st.session_state.last_job_id = result['job_id']
+                
+                # Add navigation buttons
+                st.subheader("Next Steps")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("📊 View Jobs List", key="nav_to_jobs"):
+                        st.session_state.page = "View Jobs"
+                        st.rerun()
+                
+                with col2:
+                    if st.button("🔍 View Job Details", key="nav_to_details"):
+                        st.session_state.selected_job_id = result['job_id']
+                        st.session_state.page = "Job Details"
+                        st.rerun()
                 
             else:
                 st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
@@ -379,11 +394,34 @@ def view_jobs_page():
 def job_details_page():
     st.header("🔍 Job Details")
     
+    # Add back navigation button
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("← Back to Jobs", key="back_to_jobs"):
+            st.session_state.page = "View Jobs"
+            st.rerun()
+    
     # Get job ID from session state or input
     job_id = st.session_state.get('selected_job_id') or st.session_state.get('last_job_id')
     
     if not job_id:
-        job_id = st.number_input("Enter Job ID:", min_value=1, step=1)
+        st.info("💡 No job selected. Please select a job from the list below or enter a Job ID.")
+        
+        # Show recent jobs for quick selection
+        try:
+            response = requests.get(f"{API_BASE_URL}/jobs/")
+            if response.status_code == 200:
+                jobs = response.json()
+                if jobs:
+                    st.subheader("Recent Jobs")
+                    for job in jobs[:5]:  # Show last 5 jobs
+                        if st.button(f"Job {job['id']}: {job['job_name']}", key=f"quick_select_{job['id']}"):
+                            st.session_state.selected_job_id = job['id']
+                            st.rerun()
+        except Exception:
+            pass
+            
+        job_id = st.number_input("Or enter Job ID manually:", min_value=1, step=1, key="manual_job_id")
     
     if job_id:
         try:
@@ -444,7 +482,7 @@ def job_details_page():
                     display_data = []
                     for result in filtered_results[:100]:  # Limit to first 100 for performance
                         row = {
-                            'Bank Trx ID': result['bank_trx_id'],
+                            'Bank Trx ID': result.get('bank_trx_id_display', result['bank_trx_id']),
                             'Status': result['status'],
                             'Bank Name': result['paying_bank_name'],
                             'Amount': result['amount'],
@@ -458,11 +496,11 @@ def job_details_page():
                     if len(filtered_results) > 100:
                         st.info(f"Showing first 100 out of {len(filtered_results)} results")
                 
-                # Generate report and PDF download
-                col1, col2 = st.columns(2)
+                # Generate report, PDF download, and Excel export
+                col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("📋 Generate Full Report"):
+                    if st.button("📋 Generate Full Report", key=f"generate_report_{job_id}"):
                         report_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/report/")
                         if report_response.status_code == 200:
                             report_data = report_response.json()
@@ -473,28 +511,62 @@ def job_details_page():
                 
                 with col2:
                     # Generate PDF and provide download button
-                        try:
-                            pdf_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/pdf-report/")
-                            if pdf_response.status_code == 200:
-                                # Get filename from response headers
-                                filename = f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                                
+                    try:
+                        pdf_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/pdf-report/")
+                        if pdf_response.status_code == 200:
+                            # Get filename from response headers
+                            filename = f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                            
                             # Create download button (this will trigger the download immediately)
-                                st.download_button(
+                            st.download_button(
                                 label="📄 Download PDF Report",
-                                    data=pdf_response.content,
-                                    file_name=filename,
+                                data=pdf_response.content,
+                                file_name=filename,
                                 mime="application/pdf",
-                                help="Click to download the PDF report"
-                                )
-                            else:
-                                st.error("Failed to generate PDF report")
-                            if st.button("🔄 Retry PDF Generation"):
+                                help="Click to download the PDF report",
+                                key=f"download_pdf_{job_id}"
+                            )
+                        else:
+                            st.error("Failed to generate PDF report")
+                            if st.button("🔄 Retry PDF Generation", key=f"retry_pdf_error_{job_id}"):
                                 st.rerun()
-                        except Exception as e:
-                            st.error(f"Error generating PDF: {str(e)}")
-                        if st.button("🔄 Retry PDF Generation"):
+                    except Exception as e:
+                        st.error(f"Error generating PDF: {str(e)}")
+                        if st.button("🔄 Retry PDF Generation", key=f"retry_pdf_exception_{job_id}"):
                             st.rerun()
+                
+                with col3:
+                    # Excel Export with reconciliation status
+                    if st.button("📊 Export to Excel", key=f"export_excel_{job_id}", help="Export reconciliation results to Excel with status columns"):
+                        try:
+                            with st.spinner("Generating Excel export..."):
+                                export_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/export/")
+                                
+                                if export_response.status_code == 200:
+                                    # Get filename from response headers or create one
+                                    filename = f"reconciliation_export_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                                    
+                                    # Create download button
+                                    st.download_button(
+                                        label="📥 Download Excel Export",
+                                        data=export_response.content,
+                                        file_name=filename,
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        help="Click to download the Excel file with reconciliation status",
+                                        key=f"download_excel_{job_id}"
+                                    )
+                                    
+                                    st.success("✅ Excel export ready! Click the download button above.")
+                                    st.info("📋 The Excel file contains:\n• Sheet 1: 'Cash Collection' (your data)\n• Sheet 2: Bank data\n• Both sheets include 'Reconciliation Result' column")
+                                    
+                                else:
+                                    st.error("Failed to generate Excel export")
+                                    if st.button("🔄 Retry Excel Export", key=f"retry_excel_error_{job_id}"):
+                                        st.rerun()
+                        except Exception as e:
+                            st.error(f"Error generating Excel export: {str(e)}")
+                            if st.button("🔄 Retry Excel Export", key=f"retry_excel_exception_{job_id}"):
+                                st.rerun()
                         
             elif response.status_code == 404:
                 st.error("Job not found")

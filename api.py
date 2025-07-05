@@ -1,15 +1,18 @@
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
 from fastapi.responses import JSONResponse, FileResponse
+
 from sqlalchemy.orm import Session
 import tempfile
 import os
 import json
+import pandas as pd
 from typing import List, Optional
 from datetime import datetime
 
 from database import get_db, ReconciliationJob, ReconciliationResult, AmountDiscrepancy
 from reconciliation_engine import ReconciliationEngine
 from pdf_report_generator import PDFReportGenerator
+from cleanup_service import schedule_file_cleanup
 
 app = FastAPI(title="Bank Reconciliation System", version="1.0.0")
 
@@ -387,12 +390,14 @@ async def get_job_pdf_report(job_id: int, db: Session = Depends(get_db)):
         # Generate the PDF report
         pdf_generator.generate_reconciliation_report(job_dict, results_list, pdf_path)
         
-        # Return the PDF file with background cleanup
+        # Schedule file cleanup after 5 minutes
+        schedule_file_cleanup(pdf_path, delay_seconds=300)
+        
+        # Return the PDF file
         return FileResponse(
             path=pdf_path,
             filename=f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            media_type='application/pdf',
-            background=lambda: os.unlink(pdf_path) if os.path.exists(pdf_path) else None
+            media_type='application/pdf'
         )
     except Exception as e:
         # Cleanup on error
@@ -456,6 +461,105 @@ async def analyze_files(
             pass
         
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/jobs/{job_id}/export/")
+async def export_job_results(job_id: int, db: Session = Depends(get_db)):
+    """Export reconciliation results to Excel file with two sheets and reconciliation status"""
+    logger = app.logger if hasattr(app, 'logger') else None
+    if logger:
+        logger.info(f"🚀 Starting export for job {job_id}")
+    
+    # Get job details
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    try:
+        # Load original files
+        # We need to recreate the temp files or find the original data
+        # For now, let's get the data from what we have stored
+        
+        # Initialize engine
+        export_engine = ReconciliationEngine()
+        
+        # Get results from database
+        results_query = db.query(ReconciliationResult).filter(ReconciliationResult.job_id == job_id).all()
+        
+        # Reconstruct dataframes from stored data
+        our_records = []
+        bank_records = []
+        
+        for result in results_query:
+            if result.our_record_data:
+                our_record = json.loads(result.our_record_data)
+                # Ensure all columns are preserved and scientific notation is maintained
+                our_records.append(our_record)
+            if result.bank_record_data:
+                bank_record = json.loads(result.bank_record_data)
+                # Ensure all columns are preserved and scientific notation is maintained
+                bank_records.append(bank_record)
+        
+        # Convert back to dataframes
+        if our_records:
+            our_df = pd.DataFrame(our_records)
+        else:
+            raise HTTPException(status_code=400, detail="No our records found")
+            
+        if bank_records:
+            bank_df = pd.DataFrame(bank_records)
+        else:
+            raise HTTPException(status_code=400, detail="No bank records found")
+        
+        # Create results dictionary
+        results = {
+            'summary': {
+                'total_our_records': job.total_our_records,
+                'total_bank_records': job.total_bank_records,
+                'matched_records': job.matched_records
+            }
+        }
+        
+        # Add amount comparison data if available
+        if job.amount_comparison_performed and job.our_amount_column and job.bank_amount_column:
+            results['amount_comparison'] = {
+                'our_amount_column': job.our_amount_column,
+                'bank_amount_column': job.bank_amount_column,
+                'comparison_performed': True
+            }
+        
+        # Create output filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"reconciliation_export_job_{job_id}_{timestamp}.xlsx"
+        output_path = f"temp/{filename}"
+        
+        # Ensure temp directory exists
+        os.makedirs("temp", exist_ok=True)
+        
+        # Export reconciliation results (HIGH PERFORMANCE!)
+        exported_path = export_engine.export_reconciliation_results(
+            our_df=our_df,
+            bank_df=bank_df,
+            results=results,
+            target_bank=job.bank_name,
+            output_path=output_path
+        )
+        
+        # Return file as download with scheduled cleanup
+        if os.path.exists(exported_path):
+            # Schedule file cleanup after 5 minutes
+            schedule_file_cleanup(exported_path, delay_seconds=300)
+            
+            return FileResponse(
+                path=exported_path,
+                filename=filename,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create export file")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 @app.get("/")
 async def root():

@@ -100,14 +100,19 @@ class ReconciliationEngine:
             return result['encoding']
     
     def load_file(self, file_path: str) -> pd.DataFrame:
-        """Load Excel or CSV file with encoding detection"""
+        """Load Excel or CSV file with encoding detection and precision preservation"""
         try:
             encoding = self.detect_encoding(file_path)
             
             if file_path.endswith('.csv'):
                 df = pd.read_csv(file_path, encoding=encoding)
             elif file_path.endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(file_path)
+                # Read Excel with dtype=str to preserve ALL precision including scientific notation
+                df = pd.read_excel(file_path, dtype=str)
+                # Convert numeric columns back to appropriate types, but preserve transaction IDs as strings
+                df = self._process_excel_columns(df)
+                
+                logger.info("📊 Excel file loaded with string preservation for transaction IDs")
             else:
                 raise ValueError("Unsupported file format")
             
@@ -117,6 +122,108 @@ class ReconciliationEngine:
         except Exception as e:
             logger.error(f"Error loading file: {str(e)}")
             raise
+    
+    def _process_excel_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process Excel columns to preserve transaction ID precision while converting other columns appropriately"""
+        df = df.copy()
+        
+        # Transaction ID column patterns - keep these as strings
+        id_patterns = [
+            'trx', 'transaction', 'id', 'ref', 'reference', 'bank_trx_id',
+            'transaction_id', 'payment_ref', 'bank_ref', 'transaction_reference'
+        ]
+        
+        # Amount column patterns - convert these to numeric
+        amount_patterns = [
+            'amount', 'amt', 'value', 'sum', 'total', 'credit', 'debit', 'balance',
+            'paid', 'received', 'payment', 'fee', 'charge', 'cost', 'price'
+        ]
+        
+        for col in df.columns:
+            col_lower = str(col).lower()
+            
+            # Check if this column contains transaction IDs - keep as string
+            if any(pattern in col_lower for pattern in id_patterns):
+                logger.info(f"🔧 Preserving transaction ID column as string: '{col}' (preserves scientific notation)")
+                # Force to string to ensure scientific notation like 5.45E+17 stays as text
+                df[col] = df[col].astype(str)
+                continue
+            
+            # Check if this column contains amounts - convert to numeric
+            elif any(pattern in col_lower for pattern in amount_patterns):
+                logger.info(f"💰 Converting amount column to numeric: '{col}'")
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # For other columns, try to convert to numeric if possible, otherwise keep as string
+            else:
+                # Try to detect if column is numeric by checking a few values
+                sample_values = df[col].dropna().head(10)
+                if len(sample_values) > 0:
+                    numeric_count = 0
+                    for val in sample_values:
+                        try:
+                            float(str(val).replace(',', '').replace('$', '').replace('€', '').replace('£', '').strip())
+                            numeric_count += 1
+                        except:
+                            pass
+                    
+                    # If more than 70% are numeric, convert to numeric
+                    if numeric_count / len(sample_values) > 0.7:
+                        logger.info(f"🔢 Converting numeric column: '{col}'")
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        return df
+    
+    def _fix_scientific_precision_value(self, value):
+        """Fix precision for a single value that might be in scientific notation"""
+        if pd.isna(value):
+            return value
+        
+        value_str = str(value).lower()
+        
+        # Check if it's in scientific notation
+        if 'e+' in value_str:
+            try:
+                # Parse scientific notation manually to avoid precision loss
+                mantissa_str, exponent_str = value_str.split('e+')
+                exponent = int(exponent_str)
+                
+                # Handle the mantissa (the part before e+)
+                if '.' in mantissa_str:
+                    integer_part, decimal_part = mantissa_str.split('.')
+                    # Combine integer and decimal parts
+                    mantissa_digits = integer_part + decimal_part
+                else:
+                    mantissa_digits = mantissa_str
+                
+                # Calculate the final number
+                # For 5.45e+17: mantissa_digits = "545", exponent = 17
+                # We need to add zeros to make it 18 digits total (exponent + 1)
+                
+                total_digits_needed = exponent + 1
+                current_digits = len(mantissa_digits)
+                
+                if current_digits <= total_digits_needed:
+                    # Add zeros to the right
+                    zeros_to_add = total_digits_needed - current_digits
+                    result = mantissa_digits + '0' * zeros_to_add
+                    return result
+                else:
+                    # This shouldn't happen for typical cases, but handle it
+                    return mantissa_digits
+            except:
+                return str(value)
+        
+        return str(value)
+    
+    def _format_dual_display(self, precise_value, original_value=None):
+        """Format value for dual display: scientific | precise"""
+        if original_value and str(original_value) != str(precise_value):
+            # Check if original was in scientific notation
+            original_str = str(original_value).lower()
+            if 'e+' in original_str or 'e-' in original_str:
+                return f"{original_value} | {precise_value}"
+        return str(precise_value)
     
     def find_our_bank_trx_column(self, df: pd.DataFrame) -> Tuple[str, float]:
         """
@@ -544,8 +651,14 @@ class ReconciliationEngine:
                 
                 # Check for amount discrepancies (with small tolerance for floating point)
                 if abs(our_amount - bank_amount) > 0.01:  # 1 cent tolerance
+                    # Try to get dual display format if available
+                    display_id = trx_id
+                    if hasattr(self, '_current_bank_trx_display_map'):
+                        display_id = self._current_bank_trx_display_map.get(trx_id, trx_id)
+                    
                     results['discrepancies'].append({
                         'bank_trx_id': trx_id,
+                        'bank_trx_id_display': display_id,
                         'our_amount': our_amount,
                         'bank_amount': bank_amount,
                         'difference': our_amount - bank_amount,
@@ -573,7 +686,7 @@ class ReconciliationEngine:
         return results
 
     def extract_bank_trx_ids(self, df: pd.DataFrame, column: str) -> List[str]:
-        """Extract Bank Trx IDs exactly as they appear - NO pattern matching or modification"""
+        """Extract Bank Trx IDs with precision fix for scientific notation"""
         trx_ids = []
         
         for value in df[column].dropna():
@@ -582,11 +695,49 @@ class ReconciliationEngine:
             # Skip empty values
             if not value_str or value_str.lower() in ['nan', 'none', 'null']:
                 continue
-                
-            # Use the value EXACTLY as it appears - no extraction or modification
-            trx_ids.append(value_str)
+            
+            # Apply precision fix for scientific notation
+            fixed_value = self._fix_scientific_precision_value(value)
+            trx_ids.append(fixed_value)
         
         return list(set(trx_ids))  # Remove duplicates only
+    
+    def extract_bank_trx_ids_with_originals(self, df: pd.DataFrame, column: str) -> List[dict]:
+        """Extract Bank Trx IDs with both original and fixed values for dual display"""
+        trx_data = []
+        
+        for value in df[column].dropna():
+            value_str = str(value).strip()
+            
+            # Skip empty values
+            if not value_str or value_str.lower() in ['nan', 'none', 'null']:
+                continue
+            
+            # Get both original and fixed values
+            original_value = value_str
+            fixed_value = self._fix_scientific_precision_value(value)
+            
+            # Only show dual display if there was actually a precision issue
+            if 'e+' in original_value.lower() and original_value != fixed_value:
+                display_value = self._format_dual_display(fixed_value, original_value)
+            else:
+                display_value = fixed_value
+            
+            trx_data.append({
+                'original': original_value,
+                'fixed': fixed_value,
+                'display': display_value
+            })
+        
+        # Remove duplicates based on fixed value
+        seen = set()
+        unique_data = []
+        for item in trx_data:
+            if item['fixed'] not in seen:
+                seen.add(item['fixed'])
+                unique_data.append(item)
+        
+        return unique_data
     
     def identify_bank_from_trx_ids(self, our_df: pd.DataFrame, bank_trx_ids: List[str], our_trx_column: str = None) -> Dict[str, List[str]]:
         """
@@ -617,14 +768,14 @@ class ReconciliationEngine:
         return bank_matches
     
     def _convert_to_json_serializable(self, obj):
-        """Convert pandas objects to JSON serializable format"""
+        """Convert pandas objects to JSON serializable format while preserving scientific notation"""
         if hasattr(obj, 'to_dict'):
             # Convert pandas Series to dict
             obj_dict = obj.to_dict()
         else:
             obj_dict = obj
         
-        # Convert any datetime/timestamp objects to strings
+        # Convert any datetime/timestamp objects to strings and preserve scientific notation
         for key, value in obj_dict.items():
             if pd.isna(value):
                 obj_dict[key] = None
@@ -635,13 +786,8 @@ class ReconciliationEngine:
             elif isinstance(value, (int, float)) and pd.isna(value):
                 obj_dict[key] = None
             else:
-                # Convert any other non-serializable objects to string
-                try:
-                    # Test if it's JSON serializable
-                    import json
-                    json.dumps(value)
-                except (TypeError, ValueError):
-                    obj_dict[key] = str(value)
+                # Always convert to string to preserve scientific notation (5.45E+17 stays as text)
+                obj_dict[key] = str(value)
         
         return obj_dict
     
@@ -659,8 +805,15 @@ class ReconciliationEngine:
             'summary': {}
         }
         
-        # Extract Bank Trx IDs from bank file
-        bank_trx_ids = set(self.extract_bank_trx_ids(bank_df, bank_trx_column))
+        # Extract Bank Trx IDs from bank file with precision fix and original tracking
+        bank_trx_data = self.extract_bank_trx_ids_with_originals(bank_df, bank_trx_column)
+        bank_trx_ids = set([item['fixed'] for item in bank_trx_data])
+        
+        # Create mapping for dual display
+        bank_trx_display_map = {item['fixed']: item['display'] for item in bank_trx_data}
+        
+        # Keep original bank data separate for storage (preserve scientific notation)
+        bank_df_original = bank_df.copy()
         
         # Use provided column or auto-detect Bank Trx ID
         if our_trx_column is None:
@@ -679,7 +832,14 @@ class ReconciliationEngine:
         
         # Filter our data for the target bank
         our_bank_data = our_df[our_df['Paying Bank Name'] == target_bank].copy()
-        our_trx_ids = set(our_bank_data[our_trx_column].astype(str).tolist())
+        
+        # Keep original data separate for storage (preserve scientific notation)
+        our_bank_data_original = our_bank_data.copy()
+        
+        # Apply precision fix to our transaction IDs ONLY for matching
+        our_bank_data_fixed = our_bank_data.copy()
+        our_bank_data_fixed[our_trx_column] = our_bank_data_fixed[our_trx_column].apply(self._fix_scientific_precision_value)
+        our_trx_ids = set(our_bank_data_fixed[our_trx_column].astype(str).tolist())
         
         # Find exact matches
         matched_ids = our_trx_ids.intersection(bank_trx_ids)
@@ -690,42 +850,65 @@ class ReconciliationEngine:
         
         # Prepare detailed results for exact matches
         for trx_id in matched_ids:
-            our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
+            # Get original record (preserving scientific notation) using fixed ID for lookup
+            our_record_fixed = our_bank_data_fixed[our_bank_data_fixed[our_trx_column].astype(str) == trx_id]
+            if not our_record_fixed.empty:
+                our_record_idx = our_record_fixed.index[0]
+                our_record = our_bank_data_original.loc[our_record_idx]
+            else:
+                our_record = None
             
-            # Find bank record more safely
-            bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str) == trx_id]
-            if bank_matches_df.empty:
-                # Try contains if exact match fails
-                bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)]
+            # Find bank record using precision-fixed IDs but get original data
+            bank_record = None
+            for item in bank_trx_data:
+                if item['fixed'] == trx_id:
+                    # Find original record in bank data using original ID
+                    bank_matches_df = bank_df_original[bank_df_original[bank_trx_column].astype(str) == item['original']]
+                    if not bank_matches_df.empty:
+                        bank_record = bank_matches_df.iloc[0]
+                        break
             
-            if not bank_matches_df.empty:
-                bank_record = bank_matches_df.iloc[0]
+            # Get display format for transaction ID
+            display_id = bank_trx_display_map.get(trx_id, trx_id)
             
             results['matched'].append({
                 'bank_trx_id': trx_id,
+                'bank_trx_id_display': display_id,
                 'our_record': self._convert_to_json_serializable(our_record),
                 'bank_record': self._convert_to_json_serializable(bank_record)
             })
         
         # Handle remaining unmatched records
         for trx_id in missing_in_bank:
-            our_record = our_bank_data[our_bank_data[our_trx_column].astype(str) == trx_id].iloc[0]
+            # Get original record (preserving scientific notation) using fixed ID for lookup
+            our_record_fixed = our_bank_data_fixed[our_bank_data_fixed[our_trx_column].astype(str) == trx_id]
+            if not our_record_fixed.empty:
+                our_record_idx = our_record_fixed.index[0]
+                our_record = our_bank_data_original.loc[our_record_idx]
+            else:
+                our_record = None
+            
             results['missing_in_bank'].append({
                 'bank_trx_id': trx_id,
+                'bank_trx_id_display': trx_id,  # Our data should already be precise
                 'our_record': self._convert_to_json_serializable(our_record)
             })
         
         for trx_id in missing_in_our_file:
-            # Find bank record more safely
-            bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str) == trx_id]
-            if bank_matches_df.empty:
-                # Try contains if exact match fails
-                bank_matches_df = bank_df[bank_df[bank_trx_column].astype(str).str.contains(trx_id, na=False)]
+            # Find bank record using precision-fixed mapping but get original data
+            bank_record = None
+            display_id = bank_trx_display_map.get(trx_id, trx_id)
             
-            if not bank_matches_df.empty:
-                bank_record = bank_matches_df.iloc[0]
+            for item in bank_trx_data:
+                if item['fixed'] == trx_id:
+                    bank_matches_df = bank_df_original[bank_df_original[bank_trx_column].astype(str) == item['original']]
+                    if not bank_matches_df.empty:
+                        bank_record = bank_matches_df.iloc[0]
+                        break
+            
             results['missing_in_our_file'].append({
                 'bank_trx_id': trx_id,
+                'bank_trx_id_display': display_id,
                 'bank_record': self._convert_to_json_serializable(bank_record)
             })
         
@@ -734,12 +917,19 @@ class ReconciliationEngine:
             our_amount_confidence > 30 and bank_amount_confidence > 30):
             
             logger.info("💰 Performing amount comparison...")
+            # Set display map for amount comparison
+            self._current_bank_trx_display_map = bank_trx_display_map
+            
             amount_results = self.compare_amounts(
                 our_df, bank_df, 
                 our_trx_column, bank_trx_column,
                 our_amount_column, bank_amount_column,
                 target_bank
             )
+            
+            # Clean up temporary variable
+            if hasattr(self, '_current_bank_trx_display_map'):
+                delattr(self, '_current_bank_trx_display_map')
             # Add the column detection information to the results
             amount_results['our_amount_column'] = our_amount_column
             amount_results['bank_amount_column'] = bank_amount_column
@@ -827,7 +1017,9 @@ AMOUNT COMPARISON SUMMARY:
             report += "AMOUNT DISCREPANCIES:\n"
             report += "-" * 30 + "\n"
             for i, disc in enumerate(amount_comp['discrepancies'][:20], 1):  # Show first 20
-                report += f"{i}. Transaction ID: {disc['bank_trx_id']}\n"
+                # Use dual display format if available
+                trx_id_display = disc.get('bank_trx_id_display', disc['bank_trx_id'])
+                report += f"{i}. Transaction ID: {trx_id_display}\n"
                 report += f"   Our amount: {disc['our_amount']:,.2f}\n"
                 report += f"   Bank amount: {disc['bank_amount']:,.2f}\n"
                 report += f"   Difference: {disc['difference']:,.2f} ({disc['percentage_diff']:+.1f}%)\n\n"
@@ -839,7 +1031,9 @@ AMOUNT COMPARISON SUMMARY:
             report += "\nMISSING IN BANK FILE:\n"
             report += "-" * 30 + "\n"
             for item in results['missing_in_bank'][:10]:  # Show first 10
-                report += f"Bank Trx ID: {item['bank_trx_id']}\n"
+                # Use dual display format if available
+                trx_id_display = item.get('bank_trx_id_display', item['bank_trx_id'])
+                report += f"Bank Trx ID: {trx_id_display}\n"
             if len(results['missing_in_bank']) > 10:
                 report += f"... and {len(results['missing_in_bank']) - 10} more\n"
         
@@ -847,8 +1041,199 @@ AMOUNT COMPARISON SUMMARY:
             report += "\nMISSING IN OUR FILE:\n"
             report += "-" * 30 + "\n"
             for item in results['missing_in_our_file'][:10]:  # Show first 10
-                report += f"Bank Trx ID: {item['bank_trx_id']}\n"
+                # Use dual display format if available
+                trx_id_display = item.get('bank_trx_id_display', item['bank_trx_id'])
+                report += f"Bank Trx ID: {trx_id_display}\n"
             if len(results['missing_in_our_file']) > 10:
                 report += f"... and {len(results['missing_in_our_file']) - 10} more\n"
         
-        return report 
+        return report
+    
+    def export_reconciliation_results(self, our_df: pd.DataFrame, bank_df: pd.DataFrame, 
+                                    results: Dict, target_bank: str, output_path: str) -> str:
+        """
+        Export reconciliation results to Excel with two sheets and reconciliation status column
+        Optimized for maximum performance with vectorized operations
+        """
+        logger.info(f"🚀 Starting high-performance export for {target_bank}")
+        
+        # Get column information from results
+        our_trx_column = None
+        bank_trx_column = None
+        our_amount_column = None
+        bank_amount_column = None
+        
+        # Extract column info from summary or detect again if needed
+        summary = results.get('summary', {})
+        amount_comp = results.get('amount_comparison', {})
+        
+        if amount_comp:
+            our_amount_column = amount_comp.get('our_amount_column')
+            bank_amount_column = amount_comp.get('bank_amount_column')
+        
+        # Detect transaction columns (fast detection)
+        if not our_trx_column:
+            our_trx_column, _ = self.find_our_bank_trx_column(our_df)
+        if not bank_trx_column:
+            bank_trx_column, _ = self.find_bank_trx_column(bank_df)
+        
+        logger.info(f"📊 Using columns - Our Trx: '{our_trx_column}', Bank Trx: '{bank_trx_column}'")
+        
+        # Filter our data for target bank (performance optimization)
+        our_bank_data = our_df[our_df['Paying Bank Name'] == target_bank].copy()
+        logger.info(f"📋 Processing {len(our_bank_data)} our records, {len(bank_df)} bank records")
+        
+        # Store original values AS STRINGS to prevent any conversion (for Excel export)
+        our_bank_data_original = our_bank_data.copy()
+        bank_df_original = bank_df.copy()
+        
+        # Convert transaction ID columns to strings explicitly to preserve scientific notation
+        our_bank_data_original[our_trx_column] = our_bank_data_original[our_trx_column].astype(str)
+        bank_df_original[bank_trx_column] = bank_df_original[bank_trx_column].astype(str)
+        
+        # Apply precision fixes ONLY for internal matching logic
+        our_bank_data_fixed = our_bank_data.copy()
+        our_bank_data_fixed[our_trx_column] = our_bank_data_fixed[our_trx_column].apply(self._fix_scientific_precision_value)
+        bank_df_fixed = bank_df.copy()
+        bank_df_fixed[bank_trx_column] = bank_df_fixed[bank_trx_column].apply(self._fix_scientific_precision_value)
+        
+        # Create fast lookup dictionaries for O(1) performance
+        logger.info("🔍 Building performance lookup tables...")
+        
+        # Bank transaction lookup using FIXED values for matching: {fixed_trx_id: (original_index, amount, original_trx_id)}
+        bank_lookup = {}
+        for idx, (_, row_original) in enumerate(bank_df_original.iterrows()):
+            row_fixed = bank_df_fixed.iloc[idx]
+            trx_id_fixed = str(row_fixed[bank_trx_column])
+            trx_id_original = str(row_original[bank_trx_column])
+            amount = None
+            if bank_amount_column and pd.notna(row_original[bank_amount_column]):
+                try:
+                    amount = float(row_original[bank_amount_column])
+                except:
+                    amount = None
+            bank_lookup[trx_id_fixed] = (idx, amount, trx_id_original)
+        
+        # Our transaction lookup using FIXED values for matching: {fixed_trx_id: (original_index, amount, original_trx_id)}
+        our_lookup = {}
+        for idx, (_, row_original) in enumerate(our_bank_data_original.iterrows()):
+            row_fixed = our_bank_data_fixed.iloc[idx]
+            trx_id_fixed = str(row_fixed[our_trx_column])
+            trx_id_original = str(row_original[our_trx_column])
+            amount = None
+            if our_amount_column and pd.notna(row_original[our_amount_column]):
+                try:
+                    amount = float(row_original[our_amount_column])
+                except:
+                    amount = None
+            our_lookup[trx_id_fixed] = (idx, amount, trx_id_original)
+        
+        logger.info("⚡ Computing reconciliation status (vectorized operations)...")
+        
+        # Vectorized reconciliation status for our data
+        def compute_our_status(row_idx):
+            # Get both original and fixed data
+            row_original = our_bank_data_original.iloc[row_idx]
+            row_fixed = our_bank_data_fixed.iloc[row_idx]
+            
+            trx_id_fixed = str(row_fixed[our_trx_column])
+            our_amount = None
+            
+            if our_amount_column and pd.notna(row_original[our_amount_column]):
+                try:
+                    our_amount = float(row_original[our_amount_column])
+                except:
+                    our_amount = None
+            
+            if trx_id_fixed in bank_lookup:
+                _, bank_amount, _ = bank_lookup[trx_id_fixed]
+                
+                # If both amounts exist and are valid
+                if our_amount is not None and bank_amount is not None:
+                    # Check if amounts match (1 cent tolerance)
+                    if abs(our_amount - bank_amount) <= 0.01:
+                        return "true"
+                    else:
+                        return "amt_diff"
+                else:
+                    # Transaction exists but amount comparison not possible
+                    return "true"
+            else:
+                return "false"
+        
+        # Vectorized reconciliation status for bank data
+        def compute_bank_status(row_idx):
+            # Get both original and fixed data
+            row_original = bank_df_original.iloc[row_idx]
+            row_fixed = bank_df_fixed.iloc[row_idx]
+            
+            trx_id_fixed = str(row_fixed[bank_trx_column])
+            bank_amount = None
+            
+            if bank_amount_column and pd.notna(row_original[bank_amount_column]):
+                try:
+                    bank_amount = float(row_original[bank_amount_column])
+                except:
+                    bank_amount = None
+            
+            if trx_id_fixed in our_lookup:
+                _, our_amount, _ = our_lookup[trx_id_fixed]
+                
+                # If both amounts exist and are valid
+                if our_amount is not None and bank_amount is not None:
+                    # Check if amounts match (1 cent tolerance)
+                    if abs(our_amount - bank_amount) <= 0.01:
+                        return "true"
+                    else:
+                        return "amt_diff"
+                else:
+                    # Transaction exists but amount comparison not possible
+                    return "true"
+            else:
+                return "false"
+        
+        # Apply vectorized operations (FAST!) - using original data for export
+        our_bank_data_original['Reconciliation Result'] = [compute_our_status(i) for i in range(len(our_bank_data_original))]
+        bank_df_original['Reconciliation Result'] = [compute_bank_status(i) for i in range(len(bank_df_original))]
+        
+        logger.info("📊 Creating Excel file with optimized writer...")
+        
+        # Create Excel file with optimized settings
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Sheet 1: Cash Collection (Our Data) - ORIGINAL VALUES PRESERVED
+            sheet1_name = "Cash Collection"
+            our_bank_data_original.to_excel(writer, sheet_name=sheet1_name, index=False)
+            
+            # Sheet 2: Bank Data (named after bank) - ORIGINAL VALUES PRESERVED
+            sheet2_name = target_bank[:31]  # Excel sheet name limit
+            bank_df_original.to_excel(writer, sheet_name=sheet2_name, index=False)
+            
+            # Optimize column widths for better readability
+            for sheet_name in [sheet1_name, sheet2_name]:
+                worksheet = writer.sheets[sheet_name]
+                
+                # Auto-adjust column widths (performance optimized)
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    
+                    for cell in column[:min(100, len(column))]:  # Limit check to first 100 rows for performance
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    
+                    adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        # Generate summary statistics
+        our_stats = our_bank_data_original['Reconciliation Result'].value_counts()
+        bank_stats = bank_df_original['Reconciliation Result'].value_counts()
+        
+        logger.info(f"✅ Export completed successfully!")
+        logger.info(f"📊 Our Records Summary: {dict(our_stats)}")
+        logger.info(f"📊 Bank Records Summary: {dict(bank_stats)}")
+        logger.info(f"💾 File saved: {output_path}")
+        
+        return output_path 
