@@ -118,7 +118,18 @@ def upload_files_page():
     
     # Job configuration
     st.subheader("Job Configuration")
-    job_name = st.text_input("Job Name", value=f"Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    
+    # Initialize default job name once using session state
+    if 'default_job_name' not in st.session_state:
+        st.session_state.default_job_name = f"Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        job_name = st.text_input("Job Name", value=st.session_state.default_job_name)
+    with col2:
+        if st.button("🔄 New Name", help="Generate a new timestamp-based job name"):
+            st.session_state.default_job_name = f"Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            st.rerun()
     
     # Column selection options
     our_trx_column = None
@@ -223,6 +234,73 @@ def process_reconciliation(our_file, bank_file, job_name, our_trx_column=None, b
                     st.metric("Missing in Bank", summary['missing_in_bank_count'])
                     st.metric("Missing in Our File", summary['missing_in_our_file_count'])
                     st.metric("Match Percentage", f"{summary['match_percentage']:.1f}%")
+                
+                # Display amount comparison results
+                amount_comp = result.get('amount_comparison', {})
+                if amount_comp.get('comparison_performed', False):
+                    st.subheader("💰 Amount Comparison Results")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric("Our Amount Column", amount_comp['our_amount_column'])
+                        st.metric("Our Total (All)", f"{amount_comp['our_total']:,.2f}")
+                    
+                    with col2:
+                        st.metric("Bank Amount Column", amount_comp['bank_amount_column'])
+                        st.metric("Bank Total (All)", f"{amount_comp['bank_total']:,.2f}")
+                    
+                    with col3:
+                        # Calculate difference between FULL totals, not just matched totals
+                        difference = amount_comp['our_total'] - amount_comp['bank_total']
+                        st.metric("Total Difference", f"{difference:,.2f}", delta=f"{difference:,.2f}")
+                        amounts_match = "✅ YES" if amount_comp['summary']['amounts_match'] else "❌ NO"
+                        st.metric("Amounts Match", amounts_match)
+                    
+                    with col4:
+                        discrepancies = amount_comp['summary']['total_discrepancies']
+                        st.metric("Discrepancies", discrepancies)
+                        if discrepancies > 0:
+                            st.warning(f"⚠️ {discrepancies} transactions have amount differences")
+                        else:
+                            st.success("✅ All amounts match perfectly")
+                    
+                    # Display amount discrepancies if any
+                    if amount_comp.get('discrepancies'):
+                        with st.expander(f"💰 View {len(amount_comp['discrepancies'])} Amount Discrepancies"):
+                            discrepancy_data = []
+                            for i, disc in enumerate(amount_comp['discrepancies'][:50], 1):  # Show first 50
+                                discrepancy_data.append({
+                                    '#': i,
+                                    'Transaction ID': disc['bank_trx_id'],
+                                    'Our Amount': f"{disc['our_amount']:,.2f}",
+                                    'Bank Amount': f"{disc['bank_amount']:,.2f}",
+                                    'Difference': f"{disc['difference']:,.2f}",
+                                    'Percentage': f"{disc['percentage_diff']:+.1f}%"
+                                })
+                            
+                            df_discrepancies = pd.DataFrame(discrepancy_data)
+                            st.dataframe(df_discrepancies, use_container_width=True)
+                            
+                            if len(amount_comp['discrepancies']) > 50:
+                                st.info(f"Showing first 50 out of {len(amount_comp['discrepancies'])} discrepancies")
+                
+                elif amount_comp.get('our_amount_column') and amount_comp.get('bank_amount_column'):
+                    st.subheader("💰 Amount Detection Results")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.info(f"Our Amount Column: '{amount_comp['our_amount_column']}' (Confidence: {amount_comp.get('our_amount_confidence', 0):.1f}%)")
+                    
+                    with col2:
+                        st.info(f"Bank Amount Column: '{amount_comp['bank_amount_column']}' (Confidence: {amount_comp.get('bank_amount_confidence', 0):.1f}%)")
+                    
+                    reason = amount_comp.get('reason', 'Unknown reason')
+                    st.warning(f"⚠️ Amount comparison not performed: {reason}")
+                
+                else:
+                    st.subheader("💰 Amount Detection")
+                    st.warning("⚠️ Amount columns could not be detected automatically. Consider training the amount detector or manual selection.")
                 
                 # Display bank matches
                 if result['bank_matches']:
@@ -394,25 +472,29 @@ def job_details_page():
                             st.error("Failed to generate report")
                 
                 with col2:
-                    if st.button("📄 Download PDF Report"):
+                    # Generate PDF and provide download button
                         try:
                             pdf_response = requests.get(f"{API_BASE_URL}/jobs/{job_id}/pdf-report/")
                             if pdf_response.status_code == 200:
                                 # Get filename from response headers
                                 filename = f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
                                 
-                                # Create download button
+                            # Create download button (this will trigger the download immediately)
                                 st.download_button(
-                                    label="💾 Save PDF Report",
+                                label="📄 Download PDF Report",
                                     data=pdf_response.content,
                                     file_name=filename,
-                                    mime="application/pdf"
+                                mime="application/pdf",
+                                help="Click to download the PDF report"
                                 )
-                                st.success("✅ PDF report generated successfully!")
                             else:
                                 st.error("Failed to generate PDF report")
+                            if st.button("🔄 Retry PDF Generation"):
+                                st.rerun()
                         except Exception as e:
                             st.error(f"Error generating PDF: {str(e)}")
+                        if st.button("🔄 Retry PDF Generation"):
+                            st.rerun()
                         
             elif response.status_code == 404:
                 st.error("Job not found")

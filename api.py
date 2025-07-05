@@ -7,7 +7,7 @@ import json
 from typing import List, Optional
 from datetime import datetime
 
-from database import get_db, ReconciliationJob, ReconciliationResult
+from database import get_db, ReconciliationJob, ReconciliationResult, AmountDiscrepancy
 from reconciliation_engine import ReconciliationEngine
 from pdf_report_generator import PDFReportGenerator
 
@@ -79,7 +79,10 @@ async def upload_files(
         # Perform reconciliation
         results = engine.perform_reconciliation(our_df, bank_df, bank_trx_column, target_bank, our_trx_column)
         
-        # Save job to database
+        # Extract amount comparison data
+        amount_comp = results.get('amount_comparison', {})
+        
+        # Save job to database with amount comparison data
         job = ReconciliationJob(
             job_name=job_name,
             our_file_name=our_file.filename,
@@ -90,20 +93,58 @@ async def upload_files(
             total_bank_records=results['summary']['total_bank_records'],
             matched_records=results['summary']['matched_records'],
             unmatched_our_records=results['summary']['missing_in_bank_count'],
-            unmatched_bank_records=results['summary']['missing_in_our_file_count']
+            unmatched_bank_records=results['summary']['missing_in_our_file_count'],
+            
+            # Amount comparison fields
+            our_amount_column=results['summary'].get('our_amount_column'),
+            bank_amount_column=results['summary'].get('bank_amount_column'),
+            our_amount_confidence=results['summary'].get('our_amount_confidence', 0.0),
+            bank_amount_confidence=results['summary'].get('bank_amount_confidence', 0.0),
+            amount_comparison_performed=amount_comp.get('comparison_performed', False),
+            our_total_amount=amount_comp.get('our_total', 0.0),
+            bank_total_amount=amount_comp.get('bank_total', 0.0),
+            matched_total_our=amount_comp.get('matched_total_our', 0.0),
+            matched_total_bank=amount_comp.get('matched_total_bank', 0.0),
+            total_amount_difference=amount_comp.get('our_total', 0.0) - amount_comp.get('bank_total', 0.0),
+            amounts_match=amount_comp.get('summary', {}).get('amounts_match', False),
+            total_discrepancies=amount_comp.get('summary', {}).get('total_discrepancies', 0)
         )
         
         db.add(job)
         db.commit()
         db.refresh(job)
         
-        # Save detailed results
+        # Save detailed results with enhanced amount data
         for item in results['matched']:
+            # Extract legacy amount field for backward compatibility
             try:
                 paid_amt = item['our_record'].get('Paid Amt', 0)
                 amount = float(paid_amt) if paid_amt is not None and str(paid_amt).replace('.','').replace('-','').isdigit() else 0.0
             except (ValueError, TypeError):
                 amount = 0.0
+            
+            # Extract enhanced amount data if available
+            our_amount = None
+            bank_amount = None
+            amount_difference = None
+            amount_match = None
+            
+            if amount_comp.get('comparison_performed', False):
+                our_amount_col = amount_comp.get('summary', {}).get('our_amount_column')
+                bank_amount_col = amount_comp.get('summary', {}).get('bank_amount_column')
+                
+                if our_amount_col and bank_amount_col:
+                    try:
+                        our_amount_str = str(item['our_record'].get(our_amount_col, 0)).replace(',', '').replace('$', '').strip()
+                        our_amount = float(our_amount_str) if our_amount_str not in ['nan', 'none', 'null', ''] else 0.0
+                        
+                        bank_amount_str = str(item['bank_record'].get(bank_amount_col, 0)).replace(',', '').replace('$', '').strip()
+                        bank_amount = float(bank_amount_str) if bank_amount_str not in ['nan', 'none', 'null', ''] else 0.0
+                        
+                        amount_difference = our_amount - bank_amount
+                        amount_match = abs(amount_difference) < 0.01
+                    except (ValueError, TypeError):
+                        pass
                 
             result = ReconciliationResult(
                 job_id=job.id,
@@ -112,7 +153,11 @@ async def upload_files(
                 our_record_data=json.dumps(item['our_record']),
                 bank_record_data=json.dumps(item['bank_record']),
                 paying_bank_name=target_bank,
-                amount=amount
+                amount=amount,  # Legacy field
+                our_amount=our_amount,
+                bank_amount=bank_amount,
+                amount_difference=amount_difference,
+                amount_match=amount_match
             )
             db.add(result)
         
@@ -146,6 +191,19 @@ async def upload_files(
             )
             db.add(result)
         
+        # Save amount discrepancies if any
+        if amount_comp.get('discrepancies'):
+            for disc in amount_comp['discrepancies']:
+                discrepancy = AmountDiscrepancy(
+                    job_id=job.id,
+                    bank_trx_id=disc['bank_trx_id'],
+                    our_amount=disc['our_amount'],
+                    bank_amount=disc['bank_amount'],
+                    difference=disc['difference'],
+                    percentage_diff=disc['percentage_diff']
+                )
+                db.add(discrepancy)
+        
         db.commit()
         
         # Generate report
@@ -162,6 +220,7 @@ async def upload_files(
             "bank_trx_column": bank_trx_column,
             "confidence": confidence,
             "summary": results['summary'],
+            "amount_comparison": amount_comp,
             "report": report,
             "bank_matches": bank_matches
         }
@@ -220,6 +279,47 @@ async def get_job_report(job_id: int, db: Session = Depends(get_db)):
             'missing_in_our_file_count': job.unmatched_bank_records,
             'match_percentage': (job.matched_records / max(job.total_our_records, 1)) * 100
         }
+    }
+    
+    # Add amount comparison data from stored job information
+    if job.amount_comparison_performed and job.our_amount_column and job.bank_amount_column:
+        # Get discrepancies from database
+        discrepancies = db.query(AmountDiscrepancy).filter(AmountDiscrepancy.job_id == job_id).all()
+        discrepancy_list = []
+        for disc in discrepancies:
+            discrepancy_list.append({
+                'bank_trx_id': disc.bank_trx_id,
+                'our_amount': disc.our_amount,
+                'bank_amount': disc.bank_amount,
+                'difference': disc.difference,
+                'percentage_diff': disc.percentage_diff
+            })
+        
+        results_dict['amount_comparison'] = {
+            'comparison_performed': True,
+            'our_amount_column': job.our_amount_column,
+            'bank_amount_column': job.bank_amount_column,
+            'our_amount_confidence': job.our_amount_confidence,
+            'bank_amount_confidence': job.bank_amount_confidence,
+            'our_total': job.our_total_amount,
+            'bank_total': job.bank_total_amount,
+            'matched_total_our': job.matched_total_our,
+            'matched_total_bank': job.matched_total_bank,
+            'discrepancies': discrepancy_list,
+            'summary': {
+                'our_amount_column': job.our_amount_column,
+                'bank_amount_column': job.bank_amount_column,
+                'total_difference': job.total_amount_difference,
+                'amounts_match': job.amounts_match,
+                'total_discrepancies': job.total_discrepancies
+            }
+        }
+    else:
+        results_dict['amount_comparison'] = {
+            'comparison_performed': False,
+            'our_amount_column': job.our_amount_column or 'Not detected',
+            'bank_amount_column': job.bank_amount_column or 'Not detected',
+            'reason': 'Amount comparison was not performed during reconciliation'
     }
     
     for result in results:
@@ -287,11 +387,12 @@ async def get_job_pdf_report(job_id: int, db: Session = Depends(get_db)):
         # Generate the PDF report
         pdf_generator.generate_reconciliation_report(job_dict, results_list, pdf_path)
         
-        # Return the PDF file
+        # Return the PDF file with background cleanup
         return FileResponse(
             path=pdf_path,
             filename=f"reconciliation_report_job_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            media_type='application/pdf'
+            media_type='application/pdf',
+            background=lambda: os.unlink(pdf_path) if os.path.exists(pdf_path) else None
         )
     except Exception as e:
         # Cleanup on error

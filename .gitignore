@@ -101,6 +101,9 @@ Thumbs.db
 
 # SQLite database
 reconciliation.db
+*.db
+*.sqlite
+*.sqlite3
 
 # Exported reports
 *.xlsx
