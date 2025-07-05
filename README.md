@@ -86,7 +86,30 @@ LABELED_COLUMNS = {
 ## 🚀 Quick Start
 
 ### 1. Install Dependencies
+
+**🚀 Recommended (Full Installation):**
 ```bash
+pip install -r requirements.txt
+```
+
+**⚡ Minimal Installation (without ML features):**
+```bash
+# Core dependencies only (if you don't need ML training)
+pip install fastapi uvicorn streamlit pandas openpyxl sqlalchemy reportlab chardet aiofiles python-multipart python-dateutil requests Pillow numpy
+```
+
+**🐍 Virtual Environment (Recommended):**
+```bash
+# Create virtual environment (recommended)
+python -m venv smartrecon_env
+
+# Activate virtual environment
+# Windows:
+smartrecon_env\Scripts\activate
+# macOS/Linux:
+source smartrecon_env/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -347,6 +370,7 @@ Result: Perfect match - no risk of modification errors
 ├── train_amount_detector.py # 🤖 NEW: Amount ML training script
 ├── enhanced_column_detector.pth  # 🤖 Pre-trained ML model (enhanced)
 ├── bank_trx_detector.pth    # 🤖 Pre-trained ML model (basic)
+├── fix_database_migration.py # 🔧 Database migration fix script
 ├── README.md                # This file
 └── reconciliation.db        # SQLite database (created automatically)
 ```
@@ -517,6 +541,9 @@ python train_amount_detector.py            # Train Amount ML model
 python start_api.py                        # Start API server
 python start_streamlit.py                  # Start web interface
 
+# Database troubleshooting:
+python fix_database_migration.py           # Fix database migration issues on new devices
+
 # Quick system checks:
 python -c "from database import KeywordManager; km = KeywordManager(); keywords = km.get_keywords(); print(f'Total keywords: {len(keywords)}')"
 python -c "from reconciliation_engine import ReconciliationEngine; engine = ReconciliationEngine(); print(f'ML: {engine.ml_detector is not None}, Keywords: {engine.keyword_manager is not None}')"
@@ -555,6 +582,12 @@ python -c "from reconciliation_engine import ReconciliationEngine; engine = Reco
 - Check that training_labels.py has correct format
 - Verify file paths in labels match actual files
 - Need at least 3-5 labeled files for training
+
+**"Database column errors" (e.g., 'table has no column named matched_total_our')**
+- This happens when using an existing database on a new device
+- **Quick fix**: Run the database migration script: `python fix_database_migration.py`
+- **Alternative**: Delete `reconciliation.db` file and let system create a new one
+- The system will automatically migrate old databases to new schema
 
 ## 🔮 Future Enhancements
 
